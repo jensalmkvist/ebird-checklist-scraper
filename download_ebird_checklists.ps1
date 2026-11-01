@@ -29,7 +29,7 @@
     Switch: run Chrome headless. Omit to watch the browser.
 
 .EXAMPLE
-    .\run_ebird_months.ps1 -Username jenslol -Password "sudcyd-somxon-5kerZa" `
+    .\run_ebird_months.ps1 -Username YOUR_USERNAME -Password "YOUR_PASSWORD" `
         -Region SE -StartDate "2024-09-01" -Headless
 #>
 
