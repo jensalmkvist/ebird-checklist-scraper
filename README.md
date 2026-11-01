@@ -1,6 +1,16 @@
 # ebird-checklist-scraper
 This is a small web scraper for scraper ebird .csv checklists.
 
+## Credentials
+
+The script logs in with `--username`/`--password`, or, if those are left out,
+the `EBIRD_USERNAME` and `EBIRD_PASSWORD` environment variables. With no
+password at all it asks for one.
+
+```powershell
+python ebird_month_download.py --year 2026 --month 10 --max 3
+```
+
 ## Location coordinates
 
 eBird's checklist CSV has no coordinates. Before each download the script
