@@ -1,2 +1,23 @@
 # ebird-checklist-scraper
 This is a small web scraper for scraper ebird .csv checklists.
+
+## Credentials
+
+The script logs in with `--username`/`--password`, or, if those are left out,
+the `EBIRD_USERNAME` and `EBIRD_PASSWORD` environment variables. With no
+password at all it asks for one.
+
+```powershell
+python ebird_month_download.py --year 2026 --month 10 --max 3
+```
+
+## Location coordinates
+
+eBird's checklist CSV has no coordinates. Before each download the script
+opens the checklist page, reads the location's latitude/longitude from it, and
+appends `Latitude` and `Longitude` columns to the downloaded CSV.
+[ebird-artportalen-importer](https://github.com/jensalmkvist/ebird-artportalen-importer)
+uses these to suggest the nearest Artportalen sites.
+
+If no coordinates are found the CSV is left as downloaded. Use `--no-coords`
+to skip this step.
