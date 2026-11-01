@@ -4,7 +4,7 @@
 #   python ebird_month_download.py --username YOUR_USER --password YOUR_PASS \
 #       --region SE --year 2024 --month 9 --out ./downloads_2024_09 --max 5
 
-import time, re, argparse
+import time, re, argparse, csv, html
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +28,8 @@ def parse_args():
     p.add_argument("--out", type=str, default=None, help="Output folder for downloads")
     p.add_argument("--headless", action="store_true", help="Run Chrome headless")
     p.add_argument("--max", type=int, default=None, help="Max checklists to process (for testing)")
+    p.add_argument("--no-coords", action="store_true",
+                   help="Don't add Latitude/Longitude columns (skips visiting each checklist page)")
     args = p.parse_args()
     args.month_str = f"{args.year}-{args.month:02d}"
     if not args.out:
@@ -109,6 +111,62 @@ def collect_subids(driver):
     return sorted(subids)
 
 
+# ---------- Location coordinates ----------
+# eBird's checklist CSV has no coordinates, but the checklist page links the
+# location to a map. These patterns cover the usual ways a page embeds them.
+_NUM_LAT = r"(-?\d{1,2}\.\d+)"
+_NUM_LON = r"(-?\d{1,3}\.\d+)"
+_SEP = r"\s*(?:,|%2C)\s*"
+_GMAPS = r"(?:google\.[a-z.]+/maps|maps\.google\.[a-z.]+/)"
+COORD_PATTERNS = [
+    # Google Maps links: ...maps/search/?api=1&query=LAT,LON  /  ?q=LAT,LON  /  ?ll=LAT,LON
+    re.compile(_GMAPS + r"[^\"'\s<>]*?[?&](?:query|q|ll|daddr|destination)=" + _NUM_LAT + _SEP + _NUM_LON, re.I),
+    # Google Maps "@LAT,LON" style
+    re.compile(_GMAPS + r"[^\"'\s<>]*?@" + _NUM_LAT + _SEP + _NUM_LON, re.I),
+    # data-lat / data-lng attributes
+    re.compile(r"data-lat(?:itude)?=[\"']" + _NUM_LAT + r"[\"'][^>]*?data-(?:lng|lon|long|longitude)=[\"']" + _NUM_LON, re.I),
+    # JSON: "lat": 58.3, "lng": 13.5  /  "latitude":58.3,"longitude":13.5
+    re.compile(r"[\"']lat(?:itude)?[\"']\s*:\s*[\"']?" + _NUM_LAT + r"[\"']?\s*,\s*[\"'](?:lng|lon|long|longitude)[\"']\s*:\s*[\"']?" + _NUM_LON, re.I),
+]
+
+
+def find_coords(page_html: str):
+    """Return (lat, lon) as strings from checklist page HTML, or None."""
+    text = html.unescape(page_html or "")
+    for pat in COORD_PATTERNS:
+        for m in pat.finditer(text):
+            lat, lon = float(m.group(1)), float(m.group(2))
+            if -90 <= lat <= 90 and -180 <= lon <= 180 and not (lat == 0 and lon == 0):
+                return m.group(1), m.group(2)
+    return None
+
+
+def fetch_location_coords(driver, subid: str):
+    """Open the checklist page and read the location's coordinates."""
+    driver.get(f"https://ebird.org/checklist/{subid}")
+    WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+    time.sleep(0.5)
+    return find_coords(driver.page_source)
+
+
+def add_coords_to_csv(csv_path: Path, coords):
+    """Append Latitude/Longitude columns to a downloaded checklist CSV."""
+    raw = csv_path.read_bytes()
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    text = raw.decode("utf-8-sig")
+    rows = list(csv.reader(text.splitlines()))
+    if not rows or "Latitude" in rows[0]:
+        return False
+    lat, lon = coords
+    rows[0] += ["Latitude", "Longitude"]
+    for row in rows[1:]:
+        if row:
+            row += [lat, lon]
+    with open(csv_path, "w", encoding="utf-8-sig" if bom else "utf-8", newline="") as f:
+        csv.writer(f, lineterminator="\n").writerows(rows)
+    return True
+
+
 # ---------- Direct download ----------
 def download_by_subid(driver, subid: str, download_dir: Path):
     """
@@ -153,7 +211,7 @@ def download_by_subid(driver, subid: str, download_dir: Path):
             pass
 
     print(f"  Saved: {saved_name}")
-    return True
+    return download_dir / saved_name
 
 
 # ---------- Main ----------
@@ -176,8 +234,20 @@ def main():
         for i, sid in enumerate(subids, 1):
             print(f"[{i}/{len(subids)}] {sid}")
             try:
-                if download_by_subid(driver, sid, out_dir):
+                coords = None
+                if not args.no_coords:
+                    try:
+                        coords = fetch_location_coords(driver, sid)
+                    except Exception as e:
+                        print(f"  Could not read coordinates: {e}")
+                saved = download_by_subid(driver, sid, out_dir)
+                if saved:
                     downloaded += 1
+                    if coords and saved.suffix.lower() == ".csv":
+                        add_coords_to_csv(saved, coords)
+                        print(f"  Location: {coords[0]}, {coords[1]}")
+                    elif not args.no_coords:
+                        print("  No coordinates found on checklist page")
                 time.sleep(0.7)  # polite pacing
             except Exception as e:
                 print(f"  Failed: {e}")
