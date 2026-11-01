@@ -3,9 +3,10 @@
 # Example:
 #   python ebird_month_download.py --username YOUR_USER --password YOUR_PASS \
 #       --region SE --year 2024 --month 9 --out ./downloads_2024_09 --max 5
+#   python ebird_month_download.py --start 2026-10-15 --end 2026-11-01 --skip-ids imported.txt
 
 import time, re, argparse, csv, html, os, getpass
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 from selenium import webdriver
@@ -16,17 +17,32 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 # ---------- CLI ----------
+def parse_date(s: str) -> date:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {s}")
+
+
+def last_day_of_month(year: int, month: int) -> date:
+    return date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
+
+
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Download eBird per-checklist files for a given year-month using direct download URLs (English UI)."
+        description="Download eBird per-checklist files for a year-month or a date range using direct download URLs (English UI)."
     )
     p.add_argument("--username", default=os.environ.get("EBIRD_USERNAME"),
                    help="eBird/Cornell Lab username (default: $EBIRD_USERNAME)")
     p.add_argument("--password", default=os.environ.get("EBIRD_PASSWORD"),
                    help="eBird/Cornell Lab password (default: $EBIRD_PASSWORD, else prompt)")
     p.add_argument("--region", default="SE", help="Region code (e.g., 'SE', 'US-NY')")
-    p.add_argument("--year", type=int, required=True, help="Year, e.g., 2024")
-    p.add_argument("--month", type=int, required=True, choices=range(1, 13), help="Month 1-12")
+    p.add_argument("--year", type=int, help="Year, e.g., 2024 (with --month)")
+    p.add_argument("--month", type=int, choices=range(1, 13), help="Month 1-12 (with --year)")
+    p.add_argument("--start", type=parse_date, help="First date, YYYY-MM-DD (instead of --year/--month)")
+    p.add_argument("--end", type=parse_date, help="Last date, YYYY-MM-DD (default: today)")
+    p.add_argument("--skip-ids", type=str, default=None,
+                   help="Text file with checklist IDs (one per line) not to download, e.g. already imported")
     p.add_argument("--out", type=str, default=None, help="Output folder for downloads")
     p.add_argument("--headless", action="store_true", help="Run Chrome headless")
     p.add_argument("--max", type=int, default=None, help="Max checklists to process (for testing)")
@@ -37,10 +53,32 @@ def parse_args():
         p.error("--username or $EBIRD_USERNAME is required")
     if not args.password:
         args.password = getpass.getpass("eBird password: ")
-    args.month_str = f"{args.year}-{args.month:02d}"
-    if not args.out:
-        args.out = f"./ebird_downloads_{args.year}_{args.month:02d}"
+    if args.start:
+        if args.year or args.month:
+            p.error("use either --start/--end or --year/--month")
+        args.end = args.end or date.today()
+        if args.end < args.start:
+            p.error("--end is before --start")
+        if not args.out:
+            args.out = f"./ebird_downloads_{args.start}_{args.end}"
+    elif args.year and args.month:
+        if args.end:
+            p.error("--end needs --start")
+        args.start = date(args.year, args.month, 1)
+        args.end = last_day_of_month(args.year, args.month)
+        if not args.out:
+            args.out = f"./ebird_downloads_{args.year}_{args.month:02d}"
+    else:
+        p.error("give --start [--end], or --year and --month")
     return args
+
+
+def months_between(start: date, end: date):
+    """Yield (year, month) for every month from start to end, inclusive."""
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        yield y, m
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
 
 
 # ---------- Browser setup ----------
@@ -90,31 +128,42 @@ def go_to_filtered_my_checklists(driver, region: str, year: int, month: int):
 
 
 # ---------- Collect subIDs ----------
+# Checklist links carry the date in their title:
+#   title="Checklist S406014937 - Wednesday, October 28, 2026, 11:58 AM"
+_TITLE_DATE = re.compile(r"Checklist (S\d+) - \w+, (\w+ \d{1,2}, \d{4})")
+
+
 def collect_subids(driver):
     """
     Scan the filtered page for checklist IDs:
     - From links like /checklist/S123456789
     - (Fallback) from any href containing 'subID=S...'
     Scroll until no new IDs appear (lazy-load).
+    Returns {subID: date or None}, the date read from the link title.
     """
-    subids = set()
+    subids = {}
     last_count = -1
     for _ in range(15):
         anchors = driver.find_elements(By.TAG_NAME, "a")
         for a in anchors:
             href = a.get_attribute("href") or ""
-            m = re.search(r"/checklist/(S\d+)", href)
-            if m:
-                subids.add(m.group(1))
-            m2 = re.search(r"subID=(S\d+)", href)
-            if m2:
-                subids.add(m2.group(1))
+            m = re.search(r"/checklist/(S\d+)", href) or re.search(r"subID=(S\d+)", href)
+            if not m:
+                continue
+            sid = m.group(1)
+            subids.setdefault(sid, None)
+            mt = _TITLE_DATE.search(a.get_attribute("title") or "")
+            if mt and mt.group(1) == sid:
+                try:
+                    subids[sid] = datetime.strptime(mt.group(2), "%B %d, %Y").date()
+                except ValueError:
+                    pass
         if len(subids) == last_count:
             break
         last_count = len(subids)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(0.8)
-    return sorted(subids)
+    return subids
 
 
 # ---------- Location coordinates ----------
@@ -150,8 +199,14 @@ def find_coords(page_html: str):
 def fetch_location_coords(driver, subid: str, debug_dir: Path = None):
     """Open the checklist page and read the location's coordinates.
     If none are found, the page HTML is saved to debug_dir for inspection."""
-    driver.get(f"https://ebird.org/checklist/{subid}")
-    WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+    # eBird sometimes redirects to a "session information has been lost" page
+    # instead of the checklist; try again when we didn't land on the checklist.
+    for attempt in range(3):
+        driver.get(f"https://ebird.org/checklist/{subid}")
+        WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        if f"/checklist/{subid}" in driver.current_url:
+            break
+        time.sleep(2 + 2 * attempt)
     # The map link is filled in after the page body loads, so poll for it.
     coords = None
     deadline = time.time() + 10
@@ -235,17 +290,32 @@ def main():
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    skip = set()
+    if args.skip_ids:
+        skip_path = Path(args.skip_ids)
+        if skip_path.exists():
+            skip = {l.strip() for l in skip_path.read_text(encoding="utf-8").splitlines() if l.strip()}
+
     driver = build_driver(out_dir, headless=args.headless)
     try:
         login(driver, args.username, args.password)
-        go_to_filtered_my_checklists(driver, args.region, args.year, args.month)
 
-        subids = collect_subids(driver)
+        subids, skipped = [], 0
+        for year, month in months_between(args.start, args.end):
+            go_to_filtered_my_checklists(driver, args.region, year, month)
+            found = collect_subids(driver)
+            in_range = [sid for sid, d in sorted(found.items())
+                        if d is None or args.start <= d <= args.end]
+            new = [sid for sid in in_range if sid not in skip]
+            skipped += len(in_range) - len(new)
+            subids += new
+            print(f"{year}-{month:02d}: {len(found)} checklists, {len(in_range)} in date range, {len(new)} new")
         if args.max:
             subids = subids[:args.max]
-        print(f"Found {len(subids)} checklist IDs for {args.year}-{args.month:02d} (filtered view).")
+        print(f"Found {len(subids)} checklists to download for {args.start} to {args.end}"
+              + (f" ({skipped} already imported, skipped)." if skipped else "."))
 
-        downloaded = 0
+        downloaded, failed = 0, 0
         for i, sid in enumerate(subids, 1):
             print(f"[{i}/{len(subids)}] {sid}")
             try:
@@ -265,13 +335,17 @@ def main():
                         print("  No coordinates found on checklist page")
                 time.sleep(0.7)  # polite pacing
             except Exception as e:
+                failed += 1
                 print(f"  Failed: {e}")
 
-        print(f"Done. Downloaded {downloaded} files to {out_dir.resolve()}")
+        print(f"Done. Downloaded {downloaded} files to {out_dir.resolve()}"
+              + (f"; {failed} failed." if failed else "."))
     finally:
         driver.quit()
+    return failed
 
 
 if __name__ == "__main__":
-    main()
+    # Exit code 1 when any checklist failed, so callers know the set is incomplete
+    raise SystemExit(1 if main() else 0)
 
