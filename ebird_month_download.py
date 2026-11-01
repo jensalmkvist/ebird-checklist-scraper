@@ -346,6 +346,7 @@ def main():
 
 
 if __name__ == "__main__":
-    # Exit code 1 when any checklist failed, so callers know the set is incomplete
-    raise SystemExit(1 if main() else 0)
+    # Exit code 3 when some checklists failed, so callers know the set is
+    # incomplete (other errors exit with 1, bad arguments with 2)
+    raise SystemExit(3 if main() else 0)
 

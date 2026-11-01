@@ -22,8 +22,8 @@ python ebird_month_download.py --start 2026-10-15 --end 2026-11-01
 
 Dates are read from the "My checklists" page, so only checklists in the range
 are opened. `--skip-ids FILE` skips the checklist IDs listed in the file (one
-per line), e.g. ones already imported. The exit code is 1 if any checklist
-failed to download.
+per line), e.g. ones already imported. The exit code is 3 if some checklists
+failed to download (1 for other errors, 2 for bad arguments).
 
 ## Location coordinates
 
