@@ -208,3 +208,6 @@ __marimo__/
 
 #Download folder from the script
 downloads_*/
+
+# Downloaded checklists
+ebird_downloads_*/

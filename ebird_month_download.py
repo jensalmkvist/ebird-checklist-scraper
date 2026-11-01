@@ -4,7 +4,7 @@
 #   python ebird_month_download.py --username YOUR_USER --password YOUR_PASS \
 #       --region SE --year 2024 --month 9 --out ./downloads_2024_09 --max 5
 
-import time, re, argparse, csv, html
+import time, re, argparse, csv, html, os, getpass
 from datetime import datetime
 from pathlib import Path
 
@@ -20,8 +20,10 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Download eBird per-checklist files for a given year-month using direct download URLs (English UI)."
     )
-    p.add_argument("--username", required=True, help="eBird/Cornell Lab username")
-    p.add_argument("--password", required=True, help="eBird/Cornell Lab password")
+    p.add_argument("--username", default=os.environ.get("EBIRD_USERNAME"),
+                   help="eBird/Cornell Lab username (default: $EBIRD_USERNAME)")
+    p.add_argument("--password", default=os.environ.get("EBIRD_PASSWORD"),
+                   help="eBird/Cornell Lab password (default: $EBIRD_PASSWORD, else prompt)")
     p.add_argument("--region", default="SE", help="Region code (e.g., 'SE', 'US-NY')")
     p.add_argument("--year", type=int, required=True, help="Year, e.g., 2024")
     p.add_argument("--month", type=int, required=True, choices=range(1, 13), help="Month 1-12")
@@ -31,6 +33,10 @@ def parse_args():
     p.add_argument("--no-coords", action="store_true",
                    help="Don't add Latitude/Longitude columns (skips visiting each checklist page)")
     args = p.parse_args()
+    if not args.username:
+        p.error("--username or $EBIRD_USERNAME is required")
+    if not args.password:
+        args.password = getpass.getpass("eBird password: ")
     args.month_str = f"{args.year}-{args.month:02d}"
     if not args.out:
         args.out = f"./ebird_downloads_{args.year}_{args.month:02d}"
@@ -141,12 +147,21 @@ def find_coords(page_html: str):
     return None
 
 
-def fetch_location_coords(driver, subid: str):
-    """Open the checklist page and read the location's coordinates."""
+def fetch_location_coords(driver, subid: str, debug_dir: Path = None):
+    """Open the checklist page and read the location's coordinates.
+    If none are found, the page HTML is saved to debug_dir for inspection."""
     driver.get(f"https://ebird.org/checklist/{subid}")
     WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
-    time.sleep(0.5)
-    return find_coords(driver.page_source)
+    # The map link is filled in after the page body loads, so poll for it.
+    coords = None
+    deadline = time.time() + 10
+    while not coords and time.time() < deadline:
+        time.sleep(0.5)
+        coords = find_coords(driver.page_source)
+    if not coords and debug_dir:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        (debug_dir / f"{subid}.html").write_text(driver.page_source, encoding="utf-8")
+    return coords
 
 
 def add_coords_to_csv(csv_path: Path, coords):
@@ -237,7 +252,7 @@ def main():
                 coords = None
                 if not args.no_coords:
                     try:
-                        coords = fetch_location_coords(driver, sid)
+                        coords = fetch_location_coords(driver, sid, out_dir / "debug_pages")
                     except Exception as e:
                         print(f"  Could not read coordinates: {e}")
                 saved = download_by_subid(driver, sid, out_dir)
